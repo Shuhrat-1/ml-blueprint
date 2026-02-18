@@ -1,0 +1,2 @@
+[console_scripts]
+mlb = mlb.cli:main
