@@ -25,6 +25,7 @@ src/mlb/core/logging.py
 src/mlb/core/paths.py
 src/mlb/core/registry.py
 src/mlb/core/seed.py
+src/mlb/data/__init__.py
 src/mlb/data/io.py
 src/mlb/data/leakage.py
 src/mlb/data/preprocess.py
@@ -149,6 +150,8 @@ tests/test_core_config.py
 tests/test_core_logging.py
 tests/test_core_paths.py
 tests/test_core_seed.py
+tests/test_data_io.py
+tests/test_data_split.py
 tests/test_metrics.py
 tests/test_sklearn_pipeline.py
 tests/test_split.py

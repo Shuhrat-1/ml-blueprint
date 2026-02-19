@@ -61,5 +61,7 @@ data:
         encoding="utf-8",
     )
 
-    with pytest.raises(Exception):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         load_config(cfg_path)
