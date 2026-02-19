@@ -42,6 +42,19 @@ class RunConfig(BaseModel):
     deterministic_torch: bool = False
 
 
+class ModelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Literal[
+        "logreg",
+        "rf",
+        "gb",
+        "gbr",
+        "gbrt",
+    ] = "gb"
+    params: dict = Field(default_factory=dict, description="Model hyperparameters")
+
+    
 class AppConfig(BaseModel):
     """
     Top-level config.
@@ -49,6 +62,7 @@ class AppConfig(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+    model: ModelConfig = ModelConfig()
 
     run: RunConfig
     data: DataConfig
@@ -72,3 +86,5 @@ def load_config(path: str | Path) -> AppConfig:
 def to_dict(cfg: BaseModel) -> dict:
     # stable serialization for saving config_resolved.yaml
     return cfg.model_dump(mode="python")
+
+

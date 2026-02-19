@@ -20,3 +20,11 @@ split:
   val_size: 0.0
   stratify: true
   random_state: 42
+
+model:
+  name: "gb"
+  params:
+    n_estimators: 50
+    learning_rate: 0.1
+    max_depth: 3
+
