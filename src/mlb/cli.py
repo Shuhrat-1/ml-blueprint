@@ -1,17 +1,20 @@
 import argparse
 
+import torch
+from torch.utils.data import DataLoader
+
 from mlb import __version__
 from mlb.core.artifacts import create_run_dir, save_json, save_yaml
 from mlb.core.config import load_config, to_dict
 from mlb.core.logging import setup_logger
 from mlb.core.seed import set_seed
-
 from mlb.data.io import load_dataframe
 from mlb.data.schema import Schema, resolve_columns
 from mlb.data.split import split_dataframe
-
 from mlb.eval.plots import save_plots
 from mlb.models.sklearn.train import save_sklearn_artifacts, train_sklearn
+from mlb.models.torch.dataset import TabularDataset, build_cat_vocabs, compute_num_stats
+from mlb.models.torch.torch_train import train_torch_tabular
 
 
 def main() -> None:
@@ -111,7 +114,6 @@ def main() -> None:
 
         logger.info("Day4 MVP split completed.")
         return
-    
 
     if args.cmd == "train":
         cfg = load_config(args.config)
@@ -143,38 +145,126 @@ def main() -> None:
             random_state=cfg.split.random_state,
         )
 
-        if cfg.run.engine != "sklearn":
-            raise ValueError("Day5 MVP supports only engine=sklearn for train. (Torch comes later.)")
+        if cfg.run.engine == "sklearn":
+            result = train_sklearn(
+                train_df=split.train,
+                val_df=split.val,
+                test_df=split.test,
+                target=schema.target,
+                numeric_cols=schema.numeric_cols,
+                categorical_cols=schema.categorical_cols,
+                task=cfg.run.task,
+                model_name=cfg.model.name,
+                model_params=cfg.model.params,
+            )
 
-        result = train_sklearn(
-            train_df=split.train,
-            val_df=split.val,
-            test_df=split.test,
-            target=schema.target,
-            numeric_cols=schema.numeric_cols,
-            categorical_cols=schema.categorical_cols,
-            task=cfg.run.task,
-            model_name=cfg.model.name,
-            model_params=cfg.model.params,
-        )
+            save_sklearn_artifacts(artifacts.run_dir, result.pipeline)
+            save_json(artifacts.metrics_path, result.metrics)
+            save_yaml(artifacts.config_path, to_dict(cfg))
+            save_yaml(artifacts.run_dir / "schema_resolved.yaml", schema.model_dump())
 
-        save_sklearn_artifacts(artifacts.run_dir, result.pipeline)
-        save_json(artifacts.metrics_path, result.metrics)
-        save_yaml(artifacts.config_path, to_dict(cfg))
-        save_yaml(artifacts.run_dir / "schema_resolved.yaml", schema.model_dump())
+            # plots
+            X_test = split.test[[*schema.numeric_cols, *schema.categorical_cols]]
+            y_test = split.test[schema.target]
+            y_pred = result.pipeline.predict(X_test)
+            y_proba = None
+            if cfg.run.task == "classification" and hasattr(result.pipeline, "predict_proba"):
+                y_proba = result.pipeline.predict_proba(X_test)
+            save_plots(
+                run_dir=artifacts.run_dir,
+                task=cfg.run.task,
+                y_true=y_test,
+                y_pred=y_pred,
+                y_proba=y_proba,
+            )
 
-        # plots
-        X_test = split.test[[*schema.numeric_cols, *schema.categorical_cols]]
-        y_test = split.test[schema.target]
-        y_pred = result.pipeline.predict(X_test)
-        y_proba = None
-        if cfg.run.task == "classification" and hasattr(result.pipeline, "predict_proba"):
-            y_proba = result.pipeline.predict_proba(X_test)
-        save_plots(run_dir=artifacts.run_dir, task=cfg.run.task, y_true=y_test, y_pred=y_pred, y_proba=y_proba)
+            logger.info(f"Metrics: {result.metrics}")
+            logger.info("Day5 MVP train completed.")
+            return
 
-        logger.info(f"Metrics: {result.metrics}")
-        logger.info("Day5 MVP train completed.")
-        return
+        if cfg.run.engine == "torch":
+            # build stats/vocabs from TRAIN only
+            num_mean, num_std = compute_num_stats(split.train, schema.numeric_cols)
+            vocabs = build_cat_vocabs(split.train, schema.categorical_cols)
+            cat_vocab_sizes = [vocabs[c].size for c in schema.categorical_cols]
 
-   
+            train_ds = TabularDataset(
+                split.train,
+                target=schema.target,
+                numeric_cols=schema.numeric_cols,
+                categorical_cols=schema.categorical_cols,
+                vocabs=vocabs,
+                task=cfg.run.task,
+                num_mean=num_mean,
+                num_std=num_std,
+            )
+            val_ds = TabularDataset(
+                split.val,
+                target=schema.target,
+                numeric_cols=schema.numeric_cols,
+                categorical_cols=schema.categorical_cols,
+                vocabs=vocabs,
+                task=cfg.run.task,
+                num_mean=num_mean,
+                num_std=num_std,
+            )
+            test_ds = TabularDataset(
+                split.test,
+                target=schema.target,
+                numeric_cols=schema.numeric_cols,
+                categorical_cols=schema.categorical_cols,
+                vocabs=vocabs,
+                task=cfg.run.task,
+                num_mean=num_mean,
+                num_std=num_std,
+            )
+
+            train_loader = DataLoader(train_ds, batch_size=cfg.torch.batch_size, shuffle=True)
+            val_loader = (
+                DataLoader(val_ds, batch_size=cfg.torch.batch_size, shuffle=False)
+                if len(val_ds)
+                else None
+            )
+            test_loader = DataLoader(test_ds, batch_size=cfg.torch.batch_size, shuffle=False)
+
+            result = train_torch_tabular(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                test_loader=test_loader,
+                task=cfg.run.task,
+                n_num=len(schema.numeric_cols),
+                cat_vocab_sizes=cat_vocab_sizes,
+                hidden_dims=cfg.torch.hidden_dims,
+                dropout=cfg.torch.dropout,
+                lr=cfg.torch.lr,
+                weight_decay=cfg.torch.weight_decay,
+                max_epochs=cfg.torch.max_epochs,
+                early_stopping=cfg.torch.early_stopping,
+                patience=cfg.torch.patience,
+                min_delta=cfg.torch.min_delta,
+                scheduler=cfg.torch.scheduler,
+                step_size=cfg.torch.step_size,
+                gamma=cfg.torch.gamma,
+                run_dir=artifacts.run_dir,
+            )
+
+            # save model + training artifacts
+            torch.save(result.model.state_dict(), artifacts.run_dir / "model_state.pt")
+            save_json(artifacts.metrics_path, result.metrics)
+            save_yaml(artifacts.config_path, to_dict(cfg))
+            save_yaml(artifacts.run_dir / "schema_resolved.yaml", schema.model_dump())
+            save_json(
+                artifacts.run_dir / "torch_vocabs.json", {k: v.mapping for k, v in vocabs.items()}
+            )
+            save_json(
+                artifacts.run_dir / "torch_num_stats.json",
+                {"mean": num_mean.tolist(), "std": num_std.tolist()},
+            )
+
+            logger.info(f"Metrics: {result.metrics}")
+            logger.info("Day6 Torch train completed.")
+            return
+
+        raise ValueError(f"Unknown engine: {cfg.run.engine}")
+
     parser.print_help()

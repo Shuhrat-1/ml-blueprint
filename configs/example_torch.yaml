@@ -1,6 +1,6 @@
 run:
-  name: "example"
-  engine: "sklearn"
+  name: "example_torch"
+  engine: "torch"
   task: "classification"
   seed: 42
   deterministic_torch: false
@@ -17,24 +17,24 @@ data:
 split:
   method: "random"
   test_size: 0.2
-  val_size: 0.0
-  stratify: true
+  val_size: 0.2
+  stratify: false
   random_state: 42
 
 model:
   name: "gb"
-  params:
-    n_estimators: 50
-    learning_rate: 0.1
-    max_depth: 3
+  params: {}
 
-model:
-  name: "rf"
-  params:
-    n_estimators: 200
-    max_depth: 6
-
-model:
-  name: "logreg"
-  params:
-    C: 1.0
+torch:
+  batch_size: 16
+  max_epochs: 50
+  lr: 0.01
+  weight_decay: 0.0
+  hidden_dims: [64, 32]
+  dropout: 0.1
+  early_stopping: true
+  patience: 5
+  min_delta: 0.0
+  scheduler: "plateau"
+  step_size: 10
+  gamma: 0.5

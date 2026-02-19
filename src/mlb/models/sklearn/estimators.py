@@ -22,7 +22,11 @@ def make_estimator(
         return LogisticRegression(max_iter=2000, **params)
 
     if name == "rf":
-        return RandomForestClassifier(**params) if task == "classification" else RandomForestRegressor(**params)
+        return (
+            RandomForestClassifier(**params)
+            if task == "classification"
+            else RandomForestRegressor(**params)
+        )
 
     if name in ("gb", "gbr", "gbrt"):
         return (

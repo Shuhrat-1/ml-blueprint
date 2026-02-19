@@ -92,6 +92,7 @@ src/mlb/models/torch/losses.py
 src/mlb/models/torch/tabular_model.py
 src/mlb/models/torch/torch_metrics.py
 src/mlb/models/torch/torch_train.py
+src/mlb/models/torch/utils.py
 src/mlb/stats/__init__.py
 src/mlb/stats/cli/commands.py
 src/mlb/stats/cli/main.py

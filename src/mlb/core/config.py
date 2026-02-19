@@ -54,7 +54,28 @@ class ModelConfig(BaseModel):
     ] = "gb"
     params: dict = Field(default_factory=dict, description="Model hyperparameters")
 
-    
+
+class TorchConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    batch_size: int = Field(256, ge=1)
+    max_epochs: int = Field(30, ge=1)
+    lr: float = Field(1e-3, gt=0)
+    weight_decay: float = Field(0.0, ge=0)
+    hidden_dims: list[int] = Field(default_factory=lambda: [256, 128])
+    dropout: float = Field(0.1, ge=0.0, le=0.9)
+
+    # early stopping / checkpoint
+    early_stopping: bool = True
+    patience: int = Field(5, ge=1)
+    min_delta: float = Field(0.0, ge=0.0)
+
+    # scheduler
+    scheduler: Literal["none", "step", "plateau"] = "plateau"
+    step_size: int = Field(10, ge=1)
+    gamma: float = Field(0.5, gt=0.0, lt=1.0)
+
+
 class AppConfig(BaseModel):
     """
     Top-level config.
@@ -67,6 +88,7 @@ class AppConfig(BaseModel):
     run: RunConfig
     data: DataConfig
     split: SplitConfig = SplitConfig()
+    torch: TorchConfig = TorchConfig()
 
 
 def load_yaml(path: Path) -> dict:
@@ -86,5 +108,3 @@ def load_config(path: str | Path) -> AppConfig:
 def to_dict(cfg: BaseModel) -> dict:
     # stable serialization for saving config_resolved.yaml
     return cfg.model_dump(mode="python")
-
-

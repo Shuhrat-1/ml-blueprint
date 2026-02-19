@@ -24,7 +24,9 @@ def resolve_columns(df: pd.DataFrame, schema: Schema) -> Schema:
     If numeric_cols/categorical_cols empty -> infer.
     Keeps provided cols as-is but filters out missing columns with clear errors.
     """
-    missing = [c for c in [schema.target, *schema.id_cols, *schema.datetime_cols] if c not in df.columns]
+    missing = [
+        c for c in [schema.target, *schema.id_cols, *schema.datetime_cols] if c not in df.columns
+    ]
     if missing:
         raise ValueError(f"Schema refers to missing columns: {missing}")
 

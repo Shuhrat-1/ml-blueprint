@@ -1,8 +1,8 @@
 import pandas as pd
-from mlb.models.sklearn.train import train_sklearn
 
 from mlb.data.schema import Schema, resolve_columns
 from mlb.data.split import split_dataframe
+from mlb.models.sklearn.train import train_sklearn
 
 
 def test_train_sklearn_smoke() -> None:
