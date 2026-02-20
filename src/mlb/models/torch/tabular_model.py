@@ -29,16 +29,18 @@ class TabularMLP(nn.Module):
         hidden_dims: list[int],
         dropout: float,
         out_dim: int,
+        cat_embed_dims: list[int] | None = None,
     ) -> None:
         super().__init__()
 
-        self.n_num = n_num
-        self.cat_vocab_sizes = cat_vocab_sizes
-
         self.embeddings = nn.ModuleList()
         cat_out_dim = 0
-        for vs in cat_vocab_sizes:
-            ed = _embed_dim(vs)
+
+        if cat_embed_dims is not None and len(cat_embed_dims) != len(cat_vocab_sizes):
+            raise ValueError("cat_embed_dims length must match cat_vocab_sizes length.")
+
+        for i, vs in enumerate(cat_vocab_sizes):
+            ed = cat_embed_dims[i] if cat_embed_dims is not None else _embed_dim(vs)
             self.embeddings.append(nn.Embedding(num_embeddings=vs, embedding_dim=ed))
             cat_out_dim += ed
 

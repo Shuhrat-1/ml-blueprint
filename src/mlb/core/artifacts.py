@@ -41,9 +41,18 @@ def create_run_dir(
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") if with_timestamp else ""
     parts = [p for p in [prefix, stamp, _safe_name(name)] if p]
-    dir_name = "_".join(parts) if parts else "run"
+    base_dir_name = "_".join(parts) if parts else "run"
 
-    run_dir = (paths.artifacts_dir / "runs" / dir_name).resolve()
+    runs_root = (paths.artifacts_dir / "runs").resolve()
+    runs_root.mkdir(parents=True, exist_ok=True)
+
+    # Ensure uniqueness even if started within the same second
+    run_dir = (runs_root / base_dir_name).resolve()
+    counter = 1
+    while run_dir.exists():
+        run_dir = (runs_root / f"{base_dir_name}_{counter}").resolve()
+        counter += 1
+
     run_dir.mkdir(parents=True, exist_ok=False)
 
     config_path = run_dir / "config_resolved.yaml"
