@@ -1,8 +1,8 @@
 import argparse
 import json
-from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader
 
@@ -11,6 +11,7 @@ from mlb.core.artifacts import create_run_dir, save_json, save_yaml
 from mlb.core.config import load_config, to_dict
 from mlb.core.logging import setup_logger
 from mlb.core.seed import set_seed
+from mlb.data.align import align_features, align_frame
 from mlb.data.io import load_dataframe
 from mlb.data.schema import Schema, resolve_columns
 from mlb.data.split import split_dataframe
@@ -18,6 +19,7 @@ from mlb.eval.plots import save_plots
 from mlb.models.sklearn.train import save_sklearn_artifacts, train_sklearn
 from mlb.models.torch.dataset import TabularDataset, build_cat_vocabs, compute_num_stats
 from mlb.models.torch.export import save_torch_bundle
+from mlb.models.torch.infer import predict_torch_tabular
 from mlb.models.torch.torch_train import train_torch_tabular
 
 
@@ -39,13 +41,10 @@ def main() -> None:
     p_train.add_argument("--config", required=True, help="Path to YAML config")
 
     p_pred = sub.add_parser("predict", help="Predict from a saved run dir (sklearn/torch)")
-    p_pred.add_argument("--run-dir", required=True, help="Path to artifacts run directory")
+    p_pred.add_argument("--run-dir", help="Path to artifacts run directory")
+    p_pred.add_argument("--latest", action="store_true", help="Use latest run directory")
     p_pred.add_argument("--input", required=True, help="Path to input csv/parquet")
-    p_pred.add_argument(
-        "--output",
-        default=None,
-        help="Optional output path (csv). Default: <run-dir>/predictions.csv",
-    )
+    p_pred.add_argument("--output", default=None, help="Optional output path")
 
     args = parser.parse_args()
 
@@ -239,7 +238,20 @@ def main() -> None:
                 model_name=cfg.model.name,
                 model_params=cfg.model.params,
             )
-
+            # feature_order — это и есть контракт на X для predict.
+            contract = {
+                "features": {
+                    "numeric": schema.numeric_cols,
+                    "categorical": schema.categorical_cols,
+                    "text": [],  # пока пусто
+                    "datetime": schema.datetime_cols,
+                },
+                "feature_order": [*schema.numeric_cols, *schema.categorical_cols, *schema.datetime_cols],
+                "target": schema.target,
+                "time_col": cfg.split.time_col,
+                "id_cols": schema.id_cols,
+            }
+            save_yaml(artifacts.run_dir / "schema_resolved.yaml", contract)
             save_sklearn_artifacts(artifacts.run_dir, result.pipeline)
             save_json(artifacts.metrics_path, result.metrics)
             save_yaml(artifacts.config_path, to_dict(cfg))
@@ -337,6 +349,20 @@ def main() -> None:
                 schema=schema.model_dump(),
                 config=to_dict(cfg),
             )
+
+            contract = {
+                "features": {
+                    "numeric": schema.numeric_cols,
+                    "categorical": schema.categorical_cols,
+                    "text": [],  # пока пусто
+                    "datetime": schema.datetime_cols,
+                },
+                "feature_order": [*schema.numeric_cols, *schema.categorical_cols, *schema.datetime_cols],
+                "target": schema.target,
+                "time_col": cfg.split.time_col,
+                "id_cols": schema.id_cols,
+            }
+            save_yaml(artifacts.run_dir / "schema_resolved.yaml", contract)
             save_json(artifacts.metrics_path, result.metrics)
             save_yaml(artifacts.config_path, to_dict(cfg))
             save_yaml(artifacts.run_dir / "schema_resolved.yaml", schema.model_dump())
@@ -349,16 +375,42 @@ def main() -> None:
             raise ValueError(f"Unknown engine: {cfg.run.engine}")
 
     if args.cmd == "predict":
-        run_dir = Path(args.run_dir).expanduser().resolve()
+        from pathlib import Path
+
+        import yaml
+
+        from mlb.core.paths import Paths
+
+        if not args.run_dir and not args.latest:
+            raise ValueError("Either --run-dir or --latest must be provided.")
+
+        if args.run_dir and args.latest:
+            raise ValueError("Use either --run-dir or --latest, not both.")
+
+        if args.latest:
+            runs_root = (Paths.from_env().artifacts_dir / "runs").resolve()
+            if not runs_root.exists():
+                raise FileNotFoundError(f"No runs directory found: {runs_root}")
+
+            # pick latest directory that actually looks like a run (has config_resolved.yaml)
+            candidates = []
+            for p in runs_root.iterdir():
+                if p.is_dir() and (p / "config_resolved.yaml").exists():
+                    candidates.append(p)
+
+            if not candidates:
+                raise FileNotFoundError(f"No valid run directories found in: {runs_root}")
+
+            run_dir = max(candidates, key=lambda p: p.stat().st_mtime).resolve()
+        else:
+            run_dir = Path(args.run_dir).expanduser().resolve()
+
         if not run_dir.exists():
             raise FileNotFoundError(f"run_dir not found: {run_dir}")
 
         cfg_path = run_dir / "config_resolved.yaml"
         if not cfg_path.exists():
             raise FileNotFoundError(f"Missing config_resolved.yaml in run_dir: {run_dir}")
-
-        # load resolved config dict (we don’t need full pydantic here)
-        import yaml
 
         cfg_dict = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
         engine = cfg_dict["run"]["engine"]
@@ -387,15 +439,18 @@ def main() -> None:
             pipe = joblib.load(pipe_path)
 
             # features from schema if available; else use all except target
-            if schema:
-                feats = [*schema.get("numeric_cols", []), *schema.get("categorical_cols", [])]
-                X = df[feats]
-            else:
-                X = df
+            if not schema:
+                raise FileNotFoundError("schema_resolved.yaml required for predict (feature contract).")
 
+            numeric_cols = schema.get("numeric_cols", [])
+            categorical_cols = schema.get("categorical_cols", [])
+            datetime_cols = schema.get("datetime_cols", [])
+
+            X, rep = align_frame(df, schema, mode="predict")
             pred = pipe.predict(X)
-            out = pd.DataFrame({"pred": pred})
+            # можно логировать rep.added/rep.dropped если хочешь
 
+            out = pd.DataFrame({"pred": pred})
             if task == "classification" and hasattr(pipe, "predict_proba"):
                 proba = pipe.predict_proba(X)
                 if proba.shape[1] == 2:
@@ -406,30 +461,42 @@ def main() -> None:
             return
 
         if engine == "torch":
-            import numpy as np
+            if not schema:
+                raise FileNotFoundError("schema_resolved.yaml required for torch predict.")
 
-            from mlb.models.torch.infer import predict_torch_tabular
-
+            # load torch artifacts
             vocabs = json.loads((run_dir / "torch_vocabs.json").read_text(encoding="utf-8"))
             num_stats = json.loads((run_dir / "torch_num_stats.json").read_text(encoding="utf-8"))
             num_mean = np.array(num_stats["mean"], dtype=np.float32)
             num_std = np.array(num_stats["std"], dtype=np.float32)
 
-            if not schema:
-                raise FileNotFoundError("schema_resolved.yaml required for torch predict.")
-
-            numeric_cols = schema.get("numeric_cols", [])
-            categorical_cols = schema.get("categorical_cols", [])
-            target = schema.get("target", None)
-
             state_path = run_dir / "model_state.pt"
-            hidden_dims = cfg_dict.get("torch", {}).get("hidden_dims", [256, 128])
-            dropout = cfg_dict.get("torch", {}).get("dropout", 0.1)
-            batch_size = cfg_dict.get("torch", {}).get("batch_size", 512)
+
+            # contract from schema
+            X, rep = align_frame(df, schema, mode="predict")
+
+            numeric_cols = schema["features"].get("numeric", [])
+            categorical_cols = schema["features"].get("categorical", [])
+            target = schema.get("target")
+
+            # align ONLY features used by torch model (num+cat)
+            df_aligned, rep = align_features(
+                df,
+                numeric_cols=numeric_cols,
+                categorical_cols=categorical_cols,
+                datetime_cols=[],   # torch пока не использует datetime
+                strict=False,
+            )
+
+            # model hyperparams from resolved config
+            torch_cfg = cfg_dict.get("torch", {}) or {}
+            hidden_dims = torch_cfg.get("hidden_dims", [256, 128])
+            dropout = torch_cfg.get("dropout", 0.1)
+            batch_size = torch_cfg.get("batch_size", 512)
 
             out = predict_torch_tabular(
-                df=df,
-                target=target,
+                df=X,
+                target=target,  # if missing in input, infer() will create dummy
                 numeric_cols=numeric_cols,
                 categorical_cols=categorical_cols,
                 vocabs_json=vocabs,
