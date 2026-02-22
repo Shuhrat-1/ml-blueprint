@@ -4,10 +4,9 @@ import json
 import joblib
 import numpy as np
 import pandas as pd
-from torch.utils.data import DataLoader
 
 from mlb import __version__
-from mlb.core.artifacts import create_run_dir, save_json, save_yaml
+from mlb.core.artifacts import create_run_dir, save_yaml
 from mlb.core.config import load_config, to_dict
 from mlb.core.logging import setup_logger
 from mlb.core.seed import set_seed
@@ -15,12 +14,8 @@ from mlb.data.align import align_features, align_frame
 from mlb.data.io import load_dataframe
 from mlb.data.schema import Schema, resolve_columns
 from mlb.data.split import split_dataframe
-from mlb.eval.plots import save_plots
-from mlb.models.sklearn.train import save_sklearn_artifacts, train_sklearn
-from mlb.models.torch.dataset import TabularDataset, build_cat_vocabs, compute_num_stats
-from mlb.models.torch.export import save_torch_bundle
 from mlb.models.torch.infer import predict_torch_tabular
-from mlb.models.torch.torch_train import train_torch_tabular
+from mlb.runners.run_train import run_train
 
 
 def main() -> None:
@@ -127,252 +122,18 @@ def main() -> None:
         logger.info("Day4 MVP split completed.")
         return
 
-    if args.cmd == "train":
-        cfg = load_config(args.config)
-
-        artifacts = create_run_dir(name=f"{cfg.run.name}_train")
-        logger = setup_logger(log_file=artifacts.logs_path)
-        logger.info(f"Run dir: {artifacts.run_dir}")
-
-        set_seed(cfg.run.seed, deterministic_torch=cfg.run.deterministic_torch)
-
-        df = load_dataframe(cfg.data.path, cfg.data.format)
-        schema = Schema(
-            target=cfg.data.target,
-            id_cols=cfg.data.id_cols,
-            datetime_cols=cfg.data.datetime_cols,
-            numeric_cols=cfg.data.numeric_cols,
-            categorical_cols=cfg.data.categorical_cols,
-        )
-        schema = resolve_columns(df, schema)
-
-        split = split_dataframe(
-            df=df,
-            target=schema.target,
-            method=cfg.split.method,
-            test_size=cfg.split.test_size,
-            val_size=cfg.split.val_size,
-            stratify=cfg.split.stratify if cfg.run.task == "classification" else False,
-            time_col=cfg.split.time_col,
-            random_state=cfg.split.random_state,
-        )
-
-        if cfg.run.engine == "sklearn":
-            result = train_sklearn(
-                train_df=split.train,
-                val_df=split.val,
-                test_df=split.test,
-                target=schema.target,
-                numeric_cols=schema.numeric_cols,
-                categorical_cols=schema.categorical_cols,
-                task=cfg.run.task,
-                model_name=cfg.model.name,
-                model_params=cfg.model.params,
-            )
-
-            save_sklearn_artifacts(artifacts.run_dir, result.pipeline)
-            save_json(artifacts.metrics_path, result.metrics)
-            save_yaml(artifacts.config_path, to_dict(cfg))
-            save_yaml(artifacts.run_dir / "schema_resolved.yaml", schema.model_dump())
-
-            # plots
-            X_test = split.test[[*schema.numeric_cols, *schema.categorical_cols]]
-            y_test = split.test[schema.target]
-            y_pred = result.pipeline.predict(X_test)
-            y_proba = None
-            if cfg.run.task == "classification" and hasattr(result.pipeline, "predict_proba"):
-                y_proba = result.pipeline.predict_proba(X_test)
-            save_plots(
-                run_dir=artifacts.run_dir,
-                task=cfg.run.task,
-                y_true=y_test,
-                y_pred=y_pred,
-                y_proba=y_proba,
-            )
-
-            logger.info(f"Metrics: {result.metrics}")
-            logger.info("Day5 MVP train completed.")
-            return
 
     if args.cmd == "train":
-        cfg = load_config(args.config)
+        res = run_train(config_path=args.config)
+        # res может быть dataclass или просто dict — делаем вывод максимально совместимым
+        run_dir = getattr(res, "run_dir", None) or getattr(res, "artifacts", None) or None
+        metrics = getattr(res, "metrics", None)
 
-        artifacts = create_run_dir(name=f"{cfg.run.name}_train")
-        logger = setup_logger(log_file=artifacts.logs_path)
-        logger.info(f"Run dir: {artifacts.run_dir}")
+        print(f"[INFO] Train completed. run_dir={run_dir}")
+        if metrics is not None:
+            print(f"[INFO] Metrics: {metrics}")
+        return
 
-        set_seed(cfg.run.seed, deterministic_torch=cfg.run.deterministic_torch)
-
-        # --- load + schema + split (общая часть)
-        df = load_dataframe(cfg.data.path, cfg.data.format)
-        schema = Schema(
-            target=cfg.data.target,
-            id_cols=cfg.data.id_cols,
-            datetime_cols=cfg.data.datetime_cols,
-            numeric_cols=cfg.data.numeric_cols,
-            categorical_cols=cfg.data.categorical_cols,
-        )
-        schema = resolve_columns(df, schema)
-
-        split = split_dataframe(
-            df=df,
-            target=schema.target,
-            method=cfg.split.method,
-            test_size=cfg.split.test_size,
-            val_size=cfg.split.val_size,
-            stratify=cfg.split.stratify if cfg.run.task == "classification" else False,
-            time_col=cfg.split.time_col,
-            random_state=cfg.split.random_state,
-        )
-
-        # --- ENGINE ROUTING (важно: один уровень)
-        if cfg.run.engine == "sklearn":
-            result = train_sklearn(
-                train_df=split.train,
-                val_df=split.val,
-                test_df=split.test,
-                target=schema.target,
-                numeric_cols=schema.numeric_cols,
-                categorical_cols=schema.categorical_cols,
-                task=cfg.run.task,
-                model_name=cfg.model.name,
-                model_params=cfg.model.params,
-            )
-            # feature_order — это и есть контракт на X для predict.
-            contract = {
-                "features": {
-                    "numeric": schema.numeric_cols,
-                    "categorical": schema.categorical_cols,
-                    "text": [],  # пока пусто
-                    "datetime": schema.datetime_cols,
-                },
-                "feature_order": [*schema.numeric_cols, *schema.categorical_cols, *schema.datetime_cols],
-                "target": schema.target,
-                "time_col": cfg.split.time_col,
-                "id_cols": schema.id_cols,
-            }
-            save_yaml(artifacts.run_dir / "schema_resolved.yaml", contract)
-            save_sklearn_artifacts(artifacts.run_dir, result.pipeline)
-            save_json(artifacts.metrics_path, result.metrics)
-            save_yaml(artifacts.config_path, to_dict(cfg))
-            save_yaml(artifacts.run_dir / "schema_resolved.yaml", schema.model_dump())
-
-            # plots
-            X_test = split.test[[*schema.numeric_cols, *schema.categorical_cols]]
-            y_test = split.test[schema.target]
-            y_pred = result.pipeline.predict(X_test)
-            y_proba = None
-            if cfg.run.task == "classification" and hasattr(result.pipeline, "predict_proba"):
-                y_proba = result.pipeline.predict_proba(X_test)
-
-            save_plots(
-                run_dir=artifacts.run_dir,
-                task=cfg.run.task,
-                y_true=y_test,
-                y_pred=y_pred,
-                y_proba=y_proba,
-            )
-
-            logger.info(f"Metrics: {result.metrics}")
-            logger.info("Train completed (sklearn).")
-            return
-
-        elif cfg.run.engine == "torch":
-            # build stats/vocabs from TRAIN only
-            num_mean, num_std = compute_num_stats(split.train, schema.numeric_cols)
-            vocabs = build_cat_vocabs(split.train, schema.categorical_cols)
-            cat_vocab_sizes = [vocabs[c].size for c in schema.categorical_cols]
-
-            train_ds = TabularDataset(
-                split.train,
-                target=schema.target,
-                numeric_cols=schema.numeric_cols,
-                categorical_cols=schema.categorical_cols,
-                vocabs=vocabs,
-                task=cfg.run.task,
-                num_mean=num_mean,
-                num_std=num_std,
-            )
-            val_ds = TabularDataset(
-                split.val,
-                target=schema.target,
-                numeric_cols=schema.numeric_cols,
-                categorical_cols=schema.categorical_cols,
-                vocabs=vocabs,
-                task=cfg.run.task,
-                num_mean=num_mean,
-                num_std=num_std,
-            )
-            test_ds = TabularDataset(
-                split.test,
-                target=schema.target,
-                numeric_cols=schema.numeric_cols,
-                categorical_cols=schema.categorical_cols,
-                vocabs=vocabs,
-                task=cfg.run.task,
-                num_mean=num_mean,
-                num_std=num_std,
-            )
-
-            train_loader = DataLoader(train_ds, batch_size=cfg.torch.batch_size, shuffle=True)
-            val_loader = DataLoader(val_ds, batch_size=cfg.torch.batch_size, shuffle=False) if len(val_ds) else None
-            test_loader = DataLoader(test_ds, batch_size=cfg.torch.batch_size, shuffle=False)
-
-            result = train_torch_tabular(
-                train_loader=train_loader,
-                val_loader=val_loader,
-                test_loader=test_loader,
-                task=cfg.run.task,
-                n_num=len(schema.numeric_cols),
-                cat_vocab_sizes=cat_vocab_sizes,
-                hidden_dims=cfg.torch.hidden_dims,
-                dropout=cfg.torch.dropout,
-                lr=cfg.torch.lr,
-                weight_decay=cfg.torch.weight_decay,
-                max_epochs=cfg.torch.max_epochs,
-                early_stopping=cfg.torch.early_stopping,
-                patience=cfg.torch.patience,
-                min_delta=cfg.torch.min_delta,
-                scheduler=cfg.torch.scheduler,
-                step_size=cfg.torch.step_size,
-                gamma=cfg.torch.gamma,
-                run_dir=artifacts.run_dir,
-            )
-
-            # save bundle
-            save_torch_bundle(
-                run_dir=artifacts.run_dir,
-                model=result.model,
-                vocabs={k: v.mapping for k, v in vocabs.items()},
-                num_mean=num_mean,
-                num_std=num_std,
-                schema=schema.model_dump(),
-                config=to_dict(cfg),
-            )
-
-            contract = {
-                "features": {
-                    "numeric": schema.numeric_cols,
-                    "categorical": schema.categorical_cols,
-                    "text": [],  # пока пусто
-                    "datetime": schema.datetime_cols,
-                },
-                "feature_order": [*schema.numeric_cols, *schema.categorical_cols, *schema.datetime_cols],
-                "target": schema.target,
-                "time_col": cfg.split.time_col,
-                "id_cols": schema.id_cols,
-            }
-            save_yaml(artifacts.run_dir / "schema_resolved.yaml", contract)
-            save_json(artifacts.metrics_path, result.metrics)
-            save_yaml(artifacts.config_path, to_dict(cfg))
-            save_yaml(artifacts.run_dir / "schema_resolved.yaml", schema.model_dump())
-
-            logger.info(f"Metrics: {result.metrics}")
-            logger.info("Train completed (torch).")
-            return
-
-        else:
-            raise ValueError(f"Unknown engine: {cfg.run.engine}")
 
     if args.cmd == "predict":
         from pathlib import Path
