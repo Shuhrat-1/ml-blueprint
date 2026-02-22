@@ -32,6 +32,68 @@ def _ensure_cols(df: pd.DataFrame, cols: list[str], fill_value) -> list[str]:
     return added
 
 
+def _normalize_contract(contract: dict) -> dict:
+    """
+    Backward compatible normalization:
+    - New format:
+        {"features": {"numeric": [...], "categorical": [...], "text": [...], "datetime": [...]},
+         "feature_order": [...]}
+    - Legacy schema_resolved.yaml format:
+        {"numeric_cols": [...], "categorical_cols": [...], "text_cols": [...], "datetime_cols": [...], ...}
+      optionally may contain:
+        {"feature_order": [...]} or {"features": {...}} partially.
+
+    Returns a dict guaranteed to have:
+      - "features" with keys: numeric/categorical/text/datetime
+      - "feature_order"
+    Preserves other keys (target/id_cols/time_col etc.) as-is in the same dict.
+    """
+    if not isinstance(contract, dict):
+        raise TypeError(f"contract must be a dict, got {type(contract).__name__}")
+
+    # If already new format, just ensure all keys exist
+    if "features" in contract and isinstance(contract.get("features"), dict):
+        feats = contract["features"]
+        numeric = feats.get("numeric", []) or []
+        categorical = feats.get("categorical", []) or []
+        text = feats.get("text", []) or []
+        datetime_cols = feats.get("datetime", []) or []
+
+        feature_order = contract.get("feature_order")
+        if not feature_order:
+            feature_order = [*numeric, *categorical, *text, *datetime_cols]
+
+        out = dict(contract)
+        out["features"] = {
+            "numeric": list(numeric),
+            "categorical": list(categorical),
+            "text": list(text),
+            "datetime": list(datetime_cols),
+        }
+        out["feature_order"] = list(feature_order)
+        return out
+
+    # Legacy format
+    numeric = contract.get("numeric_cols", []) or []
+    categorical = contract.get("categorical_cols", []) or []
+    text = contract.get("text_cols", []) or []
+    datetime_cols = contract.get("datetime_cols", []) or []
+
+    feature_order = contract.get("feature_order")
+    if not feature_order:
+        feature_order = [*numeric, *categorical, *text, *datetime_cols]
+
+    out = dict(contract)
+    out["features"] = {
+        "numeric": list(numeric),
+        "categorical": list(categorical),
+        "text": list(text),
+        "datetime": list(datetime_cols),
+    }
+    out["feature_order"] = list(feature_order)
+    return out
+
+
 def align_frame(
     df: pd.DataFrame,
     contract: dict[str, Any],
@@ -45,6 +107,7 @@ def align_frame(
     - coerce types
     - enforce final column order (feature_order)
     """
+    contract = _normalize_contract(contract)
     features = contract["features"]
     feature_order = contract["feature_order"]
 
@@ -115,3 +178,44 @@ def align_frame(
         report.notes.append("Feature order mismatch after alignment (unexpected).")
 
     return X, report
+
+
+def align_features(
+    df: pd.DataFrame,
+    *,
+    numeric_cols: list[str],
+    categorical_cols: list[str],
+    datetime_cols: list[str] | None = None,
+    text_cols: list[str] | None = None,
+    strict: bool = False,
+) -> tuple[pd.DataFrame, Any]:
+    """
+    Backward-compatible wrapper around align_frame().
+
+    Keeps old API used by CLI/train/predict while the framework moves to
+    contract-based align_frame(df, contract, ...).
+
+    Returns:
+      X_aligned (only feature columns, in fixed order)
+      report (AlignmentReport from align_frame; treated as 'Any' for compatibility)
+    """
+    datetime_cols = datetime_cols or []
+    text_cols = text_cols or []
+
+    contract = {
+        "features": {
+            "numeric": numeric_cols,
+            "categorical": categorical_cols,
+            "text": text_cols,
+            "datetime": datetime_cols,
+        },
+        "feature_order": [*numeric_cols, *categorical_cols, *text_cols, *datetime_cols],
+    }
+
+    # align_frame is the contract-first API
+    X, rep = align_frame(df, contract, mode="predict")
+
+    if strict and getattr(rep, "added_missing_cols", []):
+        raise ValueError(f"Missing required columns: {rep.added_missing_cols}")
+
+    return X, rep

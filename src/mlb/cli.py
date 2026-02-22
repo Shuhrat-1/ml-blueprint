@@ -472,33 +472,37 @@ def main() -> None:
 
             state_path = run_dir / "model_state.pt"
 
-            # contract from schema
-            X, rep = align_frame(df, schema, mode="predict")
-
-            numeric_cols = schema["features"].get("numeric", [])
-            categorical_cols = schema["features"].get("categorical", [])
+            # ---- Resolve feature lists (supports both new and legacy schema_resolved.yaml) ----
+            features = schema.get("features") or {}
+            numeric_cols = features.get("numeric") or schema.get("numeric_cols") or []
+            categorical_cols = features.get("categorical") or schema.get("categorical_cols") or []
             target = schema.get("target")
 
-            # align ONLY features used by torch model (num+cat)
+            # ---- Align ONLY features used by torch model (num + cat) ----
+            # torch currently does not consume datetime/text; keep it explicit
             df_aligned, rep = align_features(
                 df,
-                numeric_cols=numeric_cols,
-                categorical_cols=categorical_cols,
-                datetime_cols=[],   # torch пока не использует datetime
+                numeric_cols=list(numeric_cols),
+                categorical_cols=list(categorical_cols),
+                datetime_cols=[],
                 strict=False,
             )
 
-            # model hyperparams from resolved config
+            # (optional but useful) log alignment report
+            # print(f"[INFO] Align added={getattr(rep, 'added_missing_cols', getattr(rep, 'added', []))} "
+            #       f"dropped={getattr(rep, 'dropped_extra_cols', getattr(rep, 'dropped', []))}")
+
+            # ---- Model hyperparams from resolved config ----
             torch_cfg = cfg_dict.get("torch", {}) or {}
             hidden_dims = torch_cfg.get("hidden_dims", [256, 128])
             dropout = torch_cfg.get("dropout", 0.1)
             batch_size = torch_cfg.get("batch_size", 512)
 
             out = predict_torch_tabular(
-                df=X,
+                df=df_aligned,  # IMPORTANT: use aligned df
                 target=target,  # if missing in input, infer() will create dummy
-                numeric_cols=numeric_cols,
-                categorical_cols=categorical_cols,
+                numeric_cols=list(numeric_cols),
+                categorical_cols=list(categorical_cols),
                 vocabs_json=vocabs,
                 num_mean=num_mean,
                 num_std=num_std,

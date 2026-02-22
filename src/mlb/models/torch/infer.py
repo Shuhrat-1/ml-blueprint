@@ -8,13 +8,64 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from mlb.models.torch.dataset import CatVocab, TabularDataset
+from mlb.core.artifacts import load_yaml
+from mlb.models.torch.dataset import (
+    MISSING_ID,
+    UNK_ID,
+    CatVocab,
+    TabularDataset,
+    cat_vocab_sizes_from_vocabs,
+)
+from mlb.models.torch.signature import compute_feature_signature
 from mlb.models.torch.tabular_model import TabularMLP
 
 
 def _load_vocabs(vocabs_json: dict[str, dict[str, int]]) -> dict[str, CatVocab]:
     return {k: CatVocab(mapping=v) for k, v in vocabs_json.items()}
 
+
+def _assert_bundle_compat(
+    *,
+    meta: dict,
+    vocabs: dict[str, CatVocab],
+    num_stats: dict,
+    categorical_cols: list[str],
+    cat_vocab_sizes_ckpt: list[int],
+) -> None:
+    if meta.get("bundle_version") != 1:
+        raise ValueError(f"Unsupported torch bundle_version={meta.get('bundle_version')} (expected 1)")
+
+    # special ids policy
+    special_ids = meta.get("special_ids", {})
+    if special_ids.get("unk") != UNK_ID or special_ids.get("missing") != MISSING_ID:
+        raise ValueError(
+            f"torch bundle special_ids mismatch. Expected {{unk:{UNK_ID}, missing:{MISSING_ID}}}, got {special_ids}"
+        )
+
+    # signature check
+    schema_resolved = meta.get("schema", {})
+    expected_sig = meta.get("feature_signature")
+    if not expected_sig:
+        raise ValueError("torch bundle missing feature_signature (retrain with Day 9 bundle format).")
+
+    actual_sig = compute_feature_signature(
+        schema_resolved=schema_resolved,
+        vocabs=vocabs,
+        num_stats=num_stats,
+    )
+    if actual_sig != expected_sig:
+        raise ValueError(
+            "Torch bundle feature_signature mismatch. "
+            "This usually means schema/vocabs/num_stats do not match the trained run_dir."
+        )
+
+    # vocab sizes vs checkpoint embedding sizes (order matters!)
+    cat_vocab_sizes_from_json = cat_vocab_sizes_from_vocabs(
+    vocabs=vocabs,
+    categorical_cols=categorical_cols,
+    strict=True,
+)
+    
 
 def load_model_for_infer(
     *,
@@ -77,19 +128,25 @@ def predict_torch_tabular(
 ) -> pd.DataFrame:
     vocabs = _load_vocabs(vocabs_json)
 
+    # Load bundle meta (torch_bundle.yaml) from same directory as state_path
+    meta_path = state_path.parent / "torch_bundle.yaml"
+    meta = load_yaml(meta_path)
+
     model, device, cat_vocab_sizes_ckpt = load_model_for_infer(
         state_path=state_path,
         n_num=len(numeric_cols),
         hidden_dims=hidden_dims,
         dropout=dropout,
     )
-    cat_vocab_sizes_from_json = [vocabs[c].size for c in categorical_cols]
-    if cat_vocab_sizes_from_json != cat_vocab_sizes_ckpt:
-        raise ValueError(
-            "Vocab sizes from vocabs.json do not match checkpoint embeddings. "
-            f"from_json={cat_vocab_sizes_from_json}, from_ckpt={cat_vocab_sizes_ckpt}. "
-            "Likely wrong run_dir or schema/columns mismatch."
+    num_stats_dict = {"mean": num_mean.tolist(), "std": num_std.tolist()}
+    _assert_bundle_compat(
+        meta=meta,
+        vocabs=vocabs,
+        num_stats=num_stats_dict,
+        categorical_cols=categorical_cols,
+        cat_vocab_sizes_ckpt=cat_vocab_sizes_ckpt,
     )
+    
     # create dataset; if target missing we create dummy column
     work = df.copy()
     if target is None or target not in work.columns:

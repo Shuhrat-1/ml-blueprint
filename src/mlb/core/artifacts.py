@@ -78,7 +78,92 @@ def save_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def save_yaml(path: Path, obj: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(obj, f, sort_keys=False, allow_unicode=True)
+def load_yaml(path: str | Path) -> dict[str, Any]:
+    """
+    Load YAML file into dict.
+
+    Notes:
+    - Returns {} if file is empty.
+    - Raises FileNotFoundError if path does not exist.
+    - Raises ValueError with readable message if YAML is invalid or not a mapping.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"YAML file not found: {p}")
+
+    text = p.read_text(encoding="utf-8").strip()
+    if not text:
+        return {}
+
+    try:
+        obj = yaml.safe_load(text)
+    except Exception as e:  # pragma: no cover
+        raise ValueError(f"Failed to parse YAML: {p} ({e})") from e
+
+    if obj is None:
+        return {}
+
+    if not isinstance(obj, dict):
+        raise ValueError(f"YAML root must be a mapping/dict: {p} (got {type(obj).__name__})")
+
+    return obj
+
+
+def _yaml_sanitize(obj: Any) -> Any:
+    """
+    Convert objects that PyYAML SafeDumper can't represent into plain Python types.
+
+    Handles:
+    - Path -> str
+    - numpy scalars -> .item()
+    - string-like subclasses (e.g., torch.torch_version.TorchVersion) -> str(obj)
+    - dict/list/tuple recursion
+    """
+    if obj is None:
+        return None
+
+    # Paths
+    if isinstance(obj, Path):
+        return str(obj)
+
+    # Recurse containers
+    if isinstance(obj, dict):
+        return {str(_yaml_sanitize(k)): _yaml_sanitize(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple)):
+        return [_yaml_sanitize(x) for x in obj]
+
+    # Numpy scalars (if numpy installed/used)
+    # Avoid hard dependency import; use duck-typing
+    if hasattr(obj, "item") and callable(obj.item):
+        try:
+            v = obj.item()
+            # If still not plain after item(), continue sanitizing
+            return _yaml_sanitize(v)
+        except Exception:
+            pass
+
+    # Scalars (cast string subclasses to real str)
+    if isinstance(obj, str):
+        return str(obj)
+    if isinstance(obj, bool):
+        return bool(obj)
+    if isinstance(obj, int):
+        return int(obj)
+    if isinstance(obj, float):
+        return float(obj)
+
+    # Fallback: stringify unknown objects (keeps YAML dump stable)
+    return str(obj)
+
+
+def save_yaml(path: str | Path, obj: Any) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    safe_obj = _yaml_sanitize(obj)
+
+    with p.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(safe_obj, f, sort_keys=False)
+
+

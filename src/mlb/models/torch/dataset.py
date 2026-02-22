@@ -8,41 +8,97 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+UNK_ID = 0
+MISSING_ID = 1
 
 @dataclass(frozen=True)
 class CatVocab:
     """
     Maps category string -> integer id.
-    0 is reserved for <UNK>.
+
+    Policy:
+    - 0 = UNK (unknown category)
+    - 1 = MISSING (None/NaN/empty)
+    - known categories start from 2
     """
 
     mapping: dict[str, int]
 
     @property
     def size(self) -> int:
-        return len(self.mapping) + 1  # +UNK
+        # +2 for UNK and MISSING ids
+        return len(self.mapping) + 2
 
     def encode(self, value: Any) -> int:
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            return 0
-        return self.mapping.get(str(value), 0)
+        # Missing
+        if value is None:
+            return MISSING_ID
+        if isinstance(value, float) and np.isnan(value):
+            return MISSING_ID
+
+        s = str(value)
+        if s == "" or s.lower() == "nan":
+            return MISSING_ID
+
+        # Unknown -> UNK
+        return self.mapping.get(s, UNK_ID)
 
 
 def build_cat_vocabs(df: pd.DataFrame, cat_cols: list[str]) -> dict[str, CatVocab]:
+    """
+    Build vocabs with stable reserved ids:
+    - UNK_ID=0, MISSING_ID=1
+    - known categories start at 2
+    """
     vocabs: dict[str, CatVocab] = {}
     for c in cat_cols:
-        vals = df[c].astype("string").fillna("<NA>")
-        uniq = vals.value_counts().index.tolist()
-        mapping = {str(v): i + 1 for i, v in enumerate(uniq)}  # start from 1
+        # Keep original values; missing handled by encode()
+        vals = df[c].astype("string")
+        # Most frequent first; stable enough for MVP
+        uniq = vals.dropna().value_counts().index.tolist()
+
+        # start from 2
+        mapping = {str(v): i + 2 for i, v in enumerate(uniq)}
         vocabs[c] = CatVocab(mapping=mapping)
+
     return vocabs
+
+
+def cat_vocab_sizes_from_vocabs(
+    *,
+    vocabs: dict[str, CatVocab],
+    categorical_cols: list[str],
+    strict: bool = True,
+) -> list[int]:
+    """
+    Single source of truth for embedding vocab sizes.
+
+    Uses CatVocab.size which already encodes the policy:
+    - UNK_ID = 0
+    - MISSING_ID = 1
+    - known categories start at 2
+    Therefore: size = len(mapping) + 2
+
+    strict=True -> raise if a categorical col is missing in vocabs
+    strict=False -> treat missing vocab as size=2 (only UNK+MISSING)
+    """
+    sizes: list[int] = []
+    for c in categorical_cols:
+        v = vocabs.get(c)
+        if v is None:
+            if strict:
+                raise KeyError(f"Missing vocab for categorical col '{c}'. Available: {sorted(vocabs.keys())}")
+            sizes.append(2)  # UNK + MISSING
+        else:
+            sizes.append(int(v.size))
+    return sizes
 
 
 @dataclass(frozen=True)
 class TabularTensors:
     x_num: torch.Tensor  # float32 [N, n_num]
     x_cat: torch.Tensor  # int64 [N, n_cat]
-    y: torch.Tensor  # float32 [N] or int64 [N]
+    y: torch.Tensor      # float32 [N] or int64 [N]
 
 
 class TabularDataset(Dataset):
