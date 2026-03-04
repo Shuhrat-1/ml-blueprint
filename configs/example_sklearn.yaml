@@ -1,0 +1,40 @@
+run:
+  name: example_sklearn
+  engine: sklearn
+  task: classification
+  seed: 42
+  deterministic_torch: false
+
+data:
+  path: data/sample.csv
+  format: csv
+
+  target: target
+
+  id_cols: []
+  datetime_cols: []
+
+  numeric_cols:
+    - age
+    - income
+
+  categorical_cols:
+    - city
+
+
+split:
+  method: random
+  test_size: 0.2
+  val_size: 0.1
+
+  stratify: true
+  time_col: null
+  random_state: 42
+
+model:
+  name: logreg
+
+  params:
+    C: 1.0
+    max_iter: 100
+    solver: lbfgs

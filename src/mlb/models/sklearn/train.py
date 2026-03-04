@@ -26,11 +26,29 @@ class TrainResult:
     metrics: dict[str, float]
 
 
-def _make_estimator(task: Literal["classification", "regression"], name: str, params: dict) -> Any:
+def _default_params(task: Literal["classification", "regression"], name: str) -> dict:
+    """
+    Default hyperparameters for sklearn estimators.
+    Config params override these defaults.
+    """
     if name == "logreg":
         if task != "classification":
             raise ValueError("logreg is only valid for classification.")
-        return LogisticRegression(max_iter=2000, **params)
+        return {
+            "max_iter": 2000,
+        }
+
+    return {}
+
+
+def _make_estimator(task: Literal["classification", "regression"], name: str, params: dict) -> Any:
+    defaults = _default_params(task, name)
+
+    # config params override defaults
+    merged = {**defaults, **params}
+
+    if name == "logreg":
+        return LogisticRegression(**merged)
 
     if name == "rf":
         if task == "classification":

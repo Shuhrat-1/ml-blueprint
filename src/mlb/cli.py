@@ -1,20 +1,14 @@
 import argparse
-import json
-
-import joblib
-import numpy as np
-import pandas as pd
 
 from mlb import __version__
 from mlb.core.artifacts import create_run_dir, save_yaml
 from mlb.core.config import load_config, to_dict
 from mlb.core.logging import setup_logger
 from mlb.core.seed import set_seed
-from mlb.data.align import align_features, align_frame
 from mlb.data.io import load_dataframe
 from mlb.data.schema import Schema, resolve_columns
 from mlb.data.split import split_dataframe
-from mlb.models.torch.infer import predict_torch_tabular
+from mlb.runners.run_predict import run_predict
 from mlb.runners.run_train import run_train
 
 
@@ -136,147 +130,11 @@ def main() -> None:
 
 
     if args.cmd == "predict":
-        from pathlib import Path
-
-        import yaml
-
-        from mlb.core.paths import Paths
-
-        if not args.run_dir and not args.latest:
-            raise ValueError("Either --run-dir or --latest must be provided.")
-
-        if args.run_dir and args.latest:
-            raise ValueError("Use either --run-dir or --latest, not both.")
-
-        if args.latest:
-            runs_root = (Paths.from_env().artifacts_dir / "runs").resolve()
-            if not runs_root.exists():
-                raise FileNotFoundError(f"No runs directory found: {runs_root}")
-
-            # pick latest directory that actually looks like a run (has config_resolved.yaml)
-            candidates = []
-            for p in runs_root.iterdir():
-                if p.is_dir() and (p / "config_resolved.yaml").exists():
-                    candidates.append(p)
-
-            if not candidates:
-                raise FileNotFoundError(f"No valid run directories found in: {runs_root}")
-
-            run_dir = max(candidates, key=lambda p: p.stat().st_mtime).resolve()
-        else:
-            run_dir = Path(args.run_dir).expanduser().resolve()
-
-        if not run_dir.exists():
-            raise FileNotFoundError(f"run_dir not found: {run_dir}")
-
-        cfg_path = run_dir / "config_resolved.yaml"
-        if not cfg_path.exists():
-            raise FileNotFoundError(f"Missing config_resolved.yaml in run_dir: {run_dir}")
-
-        cfg_dict = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-        engine = cfg_dict["run"]["engine"]
-        task = cfg_dict["run"]["task"]
-
-        # load input
-        inp = Path(args.input).expanduser().resolve()
-        fmt = "parquet" if inp.suffix.lower() == ".parquet" else "csv"
-        df = pd.read_parquet(inp) if fmt == "parquet" else pd.read_csv(inp)
-
-        schema_path = run_dir / "schema_resolved.yaml"
-        schema = (
-            yaml.safe_load(schema_path.read_text(encoding="utf-8"))
-            if schema_path.exists()
-            else None
+        res = run_predict(
+            run_dir=args.run_dir,
+            latest=args.latest,
+            input_path=args.input,
+            output_path=args.output,
         )
-
-        out_path = (
-            Path(args.output).expanduser().resolve()
-            if args.output
-            else (run_dir / "predictions.csv")
-        )
-
-        if engine == "sklearn":
-            pipe_path = run_dir / "pipeline.joblib"
-            pipe = joblib.load(pipe_path)
-
-            # features from schema if available; else use all except target
-            if not schema:
-                raise FileNotFoundError("schema_resolved.yaml required for predict (feature contract).")
-
-            numeric_cols = schema.get("numeric_cols", [])
-            categorical_cols = schema.get("categorical_cols", [])
-            datetime_cols = schema.get("datetime_cols", [])
-
-            X, rep = align_frame(df, schema, mode="predict")
-            pred = pipe.predict(X)
-            # можно логировать rep.added/rep.dropped если хочешь
-
-            out = pd.DataFrame({"pred": pred})
-            if task == "classification" and hasattr(pipe, "predict_proba"):
-                proba = pipe.predict_proba(X)
-                if proba.shape[1] == 2:
-                    out["proba_1"] = proba[:, 1]
-
-            out.to_csv(out_path, index=False)
-            print(f"Saved predictions to: {out_path}")
-            return
-
-        if engine == "torch":
-            if not schema:
-                raise FileNotFoundError("schema_resolved.yaml required for torch predict.")
-
-            # load torch artifacts
-            vocabs = json.loads((run_dir / "torch_vocabs.json").read_text(encoding="utf-8"))
-            num_stats = json.loads((run_dir / "torch_num_stats.json").read_text(encoding="utf-8"))
-            num_mean = np.array(num_stats["mean"], dtype=np.float32)
-            num_std = np.array(num_stats["std"], dtype=np.float32)
-
-            state_path = run_dir / "model_state.pt"
-
-            # ---- Resolve feature lists (supports both new and legacy schema_resolved.yaml) ----
-            features = schema.get("features") or {}
-            numeric_cols = features.get("numeric") or schema.get("numeric_cols") or []
-            categorical_cols = features.get("categorical") or schema.get("categorical_cols") or []
-            target = schema.get("target")
-
-            # ---- Align ONLY features used by torch model (num + cat) ----
-            # torch currently does not consume datetime/text; keep it explicit
-            df_aligned, rep = align_features(
-                df,
-                numeric_cols=list(numeric_cols),
-                categorical_cols=list(categorical_cols),
-                datetime_cols=[],
-                strict=False,
-            )
-
-            # (optional but useful) log alignment report
-            # print(f"[INFO] Align added={getattr(rep, 'added_missing_cols', getattr(rep, 'added', []))} "
-            #       f"dropped={getattr(rep, 'dropped_extra_cols', getattr(rep, 'dropped', []))}")
-
-            # ---- Model hyperparams from resolved config ----
-            torch_cfg = cfg_dict.get("torch", {}) or {}
-            hidden_dims = torch_cfg.get("hidden_dims", [256, 128])
-            dropout = torch_cfg.get("dropout", 0.1)
-            batch_size = torch_cfg.get("batch_size", 512)
-
-            out = predict_torch_tabular(
-                df=df_aligned,  # IMPORTANT: use aligned df
-                target=target,  # if missing in input, infer() will create dummy
-                numeric_cols=list(numeric_cols),
-                categorical_cols=list(categorical_cols),
-                vocabs_json=vocabs,
-                num_mean=num_mean,
-                num_std=num_std,
-                state_path=state_path,
-                task=task,
-                hidden_dims=hidden_dims,
-                dropout=dropout,
-                batch_size=batch_size,
-            )
-
-            out.to_csv(out_path, index=False)
-            print(f"Saved predictions to: {out_path}")
-            return
-
-        raise ValueError(f"Unknown engine in run dir config: {engine}")
-    parser.print_help()
+        print(f"Saved predictions to: {res.out_path}")
+        return
